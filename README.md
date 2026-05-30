@@ -20,6 +20,7 @@ LaraCaption overlays the lesson's subtitle right on top of the video, can transl
 - **⏸️ Study mode** — pauses automatically at each subtitle so you can read and absorb one phrase at a time.
 - **🔠 Subtitle size** — small / medium / large / extra large.
 - **⬇️ Download subtitle** — export the caption as an `.srt` file.
+- **▶️ Continue watching** — one click jumps back to the last lesson you opened (Laracasts resumes the video where you left off), or to your *watching* list on first use.
 
 ---
 
@@ -55,6 +56,7 @@ Settings are saved automatically. With `gpt-4o-mini` the cost is just a few cent
    - **Show subtitle on video** — overlay turns on; press play and it follows the video.
    - **Chat about this video** — opens the chat panel; wait for *"transcript ready"* and ask away (in English or your language).
    - **Download subtitle (.srt)** — saves the caption file.
+   - **Continue watching** — reopens your last lesson (or your *watching* list).
 3. Change the mode/size/study-mode anytime — it updates live.
 
 ---
@@ -62,7 +64,8 @@ Settings are saved automatically. With `gpt-4o-mini` the cost is just a few cent
 ## 🔒 Privacy
 
 - Your **OpenAI API key** is stored only in your browser (`chrome.storage.local`). It is sent **only to the OpenAI API** when translating or chatting.
-- LaraCaption does **not** store your Laracasts credentials. Use **Login on Laracasts** to sign in on the official site in the same Chrome profile.
+- LaraCaption does **not** store your Laracasts credentials — you sign in on the official Laracasts site in the same Chrome profile.
+- The last lesson URL you open is stored locally (`chrome.storage.local`) only to power the **Continue watching** button.
 - Subtitle/transcript text is sent to OpenAI **only** when you enable translation or use the chat.
 
 ---

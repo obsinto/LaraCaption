@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Laracasts Subtitle Viewer",
-  "description": "Shows only the subtitle/transcript for the current Laracasts lesson.",
+  "name": "LaraCaption",
+  "description": "Synced subtitles, AI translation (dual subtitles), study mode and an AI chat tutor for Laracasts lessons.",
   "version": "0.1.0",
   "action": {
-    "default_title": "Laracasts subtitles",
+    "default_title": "LaraCaption",
     "default_popup": "src/popup.html"
   },
   "background": {

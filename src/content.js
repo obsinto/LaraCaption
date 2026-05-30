@@ -729,4 +729,32 @@
 
     console.log(`🎉 Sucesso! Arquivo salvo como: ${fileName}`);
   }
+
+  // ===================================================================
+  //  Lembra a última aula assistida (para o botão "Continue watching")
+  // ===================================================================
+  //
+  // Salva a URL da aula atual sempre que estamos numa página de episódio.
+  // O Laracasts é uma SPA, então a URL muda sem recarregar — checamos
+  // periodicamente além da carga inicial. Ao reabrir a aula, o próprio
+  // Laracasts retoma o vídeo na posição onde você parou.
+  const LessonTracker = {
+    last: "",
+
+    start() {
+      this.capture();
+      setInterval(() => this.capture(), 2000);
+    },
+
+    capture() {
+      const match = location.pathname.match(/^\/series\/[^/]+\/episodes\/\d+/);
+      if (!match) return;
+      const url = location.origin + match[0];
+      if (url === this.last) return;
+      this.last = url;
+      chrome.storage.local.set({ lastLesson: url });
+    }
+  };
+
+  LessonTracker.start();
 })();

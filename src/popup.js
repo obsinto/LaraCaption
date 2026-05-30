@@ -4,8 +4,7 @@ const statusEl = document.getElementById("status");
 const overlayButton = document.getElementById("overlay");
 const chatButton = document.getElementById("chat");
 const downloadButton = document.getElementById("download");
-const loginButton = document.getElementById("login");
-const openButton = document.getElementById("open");
+const continueButton = document.getElementById("continue");
 
 const apiKeyEl = document.getElementById("apiKey");
 const targetLangEl = document.getElementById("targetLang");
@@ -13,6 +12,7 @@ const modeEl = document.getElementById("mode");
 const modelEl = document.getElementById("model");
 const fontSizeEl = document.getElementById("fontSize");
 const autoPauseEl = document.getElementById("autoPause");
+const settingsBox = document.getElementById("settingsBox");
 
 const DEFAULT_SETTINGS = {
   apiKey: "",
@@ -32,8 +32,7 @@ document.addEventListener("DOMContentLoaded", loadSettings);
 overlayButton.addEventListener("click", toggleOverlay);
 chatButton.addEventListener("click", openChat);
 downloadButton.addEventListener("click", downloadSrt);
-loginButton.addEventListener("click", () => openUrl("https://laracasts.com/login"));
-openButton.addEventListener("click", () => openUrl("https://laracasts.com/series"));
+continueButton.addEventListener("click", continueWatching);
 
 async function loadSettings() {
   const { settings } = await chrome.storage.local.get("settings");
@@ -44,6 +43,9 @@ async function loadSettings() {
   modelEl.value = merged.model;
   fontSizeEl.value = merged.fontSize;
   autoPauseEl.checked = merged.autoPause;
+
+  // Abre o painel de configurações só no primeiro uso (sem API key).
+  if (settingsBox) settingsBox.open = !merged.apiKey;
 }
 
 async function saveSettings() {
@@ -114,6 +116,13 @@ async function activeTab() {
   return tab;
 }
 
+async function continueWatching() {
+  // Abre a última aula assistida (o Laracasts retoma a posição do vídeo);
+  // se ainda não houver, vai para a lista oficial de "assistindo".
+  const { lastLesson } = await chrome.storage.local.get("lastLesson");
+  openUrl(lastLesson || "https://laracasts.com/series?watching=1");
+}
+
 async function openUrl(url) {
   await chrome.tabs.create({ url });
   window.close();
@@ -128,6 +137,5 @@ function setBusy(isBusy) {
   overlayButton.disabled = isBusy;
   chatButton.disabled = isBusy;
   downloadButton.disabled = isBusy;
-  loginButton.disabled = isBusy;
-  openButton.disabled = isBusy;
+  continueButton.disabled = isBusy;
 }
