@@ -44,8 +44,8 @@
       });
     },
 
-    send(cmd) {
-      window.postMessage({ source: "lsv-content", cmd }, "*");
+    send(cmd, extra) {
+      window.postMessage({ source: "lsv-content", cmd, ...(extra || {}) }, "*");
     },
 
     request(cmd, timeout = 30000) {
@@ -89,7 +89,6 @@
     lastError: "",
     storageBound: false,
     originals: [], // linhas da legenda atual (vêm do inject.js)
-    lastKey: "", // assinatura da última legenda (para o modo estudo)
     msgHandler: null,
     placeTimer: null,
 
@@ -111,6 +110,7 @@
       chrome.storage.local.get("settings").then(({ settings }) => {
         if (settings) this.settings = settings;
         this.render();
+        pageBridge.send("CONFIG", { autoPause: !!this.settings.autoPause });
       });
 
       // Atualiza ao vivo quando o usuário muda as preferências no popup
@@ -127,6 +127,7 @@
           }
           this.lastError = "";
           this.render();
+          pageBridge.send("CONFIG", { autoPause: !!this.settings.autoPause });
           if (this.settings.mode && this.settings.mode !== "original") {
             this.requestTranslations([...this.originals]);
           }
@@ -173,11 +174,12 @@
         this.el = null;
       }
       this.originals = [];
-      this.lastKey = "";
       console.log("📝 Legenda na tela: DESATIVADA");
     },
 
-    // Recebe a legenda atual (+ próximas) do inject.js.
+    // Recebe a legenda atual (+ próximas) do inject.js. O modo estudo
+    // (pausa no fim da frase) é tratado pelo inject.js, que conhece o
+    // currentTime e o endTime de cada cue.
     onCues(data) {
       this.originals = Array.isArray(data.lines) ? data.lines : [];
       this.ensurePlaced();
@@ -188,18 +190,6 @@
         const ahead = Array.isArray(data.ahead) ? data.ahead : [];
         this.requestTranslations([...this.originals, ...ahead]);
       }
-
-      // Modo estudo: pausa no início de cada nova legenda
-      const key = this.originals.join(" | ");
-      if (
-        this.settings &&
-        this.settings.autoPause &&
-        this.originals.length &&
-        key !== this.lastKey
-      ) {
-        pageBridge.send("PAUSE");
-      }
-      this.lastKey = key;
     },
 
     render() {
@@ -331,7 +321,7 @@
           white-space: pre-wrap;
         }
         #lsv-overlay .lsv-trans {
-          color: #ffe08a;
+          color: #ffc24d;
           font-size: calc(clamp(15px, 2.1vw, 26px) * var(--lsv-scale));
         }
         #lsv-overlay .lsv-err {
@@ -557,10 +547,10 @@
           height: 100vh;
           display: none;
           flex-direction: column;
-          background: #14171a;
-          color: #e8eaed;
+          background: #0b1524;
+          color: #e7edf5;
           font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-          box-shadow: -8px 0 30px rgba(0, 0, 0, 0.45);
+          box-shadow: -8px 0 30px rgba(0, 0, 0, 0.5);
           z-index: 2147483600;
         }
         #lsv-chat .lsv-chat-header {
@@ -570,23 +560,27 @@
           padding: 14px 16px;
           font-weight: 700;
           font-size: 15px;
-          background: #0d6b57;
-          color: #fff;
+          background: #162136;
+          color: #ffac00;
+          border-bottom: 1px solid #26344c;
         }
         #lsv-chat .lsv-chat-close {
           background: transparent;
           border: 0;
-          color: #fff;
+          color: #8a95a8;
           cursor: pointer;
           font-size: 16px;
           line-height: 1;
           padding: 4px;
         }
+        #lsv-chat .lsv-chat-close:hover {
+          color: #ffac00;
+        }
         #lsv-chat .lsv-chat-status {
           padding: 8px 16px;
           font-size: 12px;
-          color: #9aa0a6;
-          border-bottom: 1px solid #23272b;
+          color: #8a95a8;
+          border-bottom: 1px solid #1c2942;
         }
         #lsv-chat .lsv-chat-status.lsv-chat-err {
           color: #ff8a8a;
@@ -615,13 +609,13 @@
           word-wrap: break-word;
         }
         #lsv-chat .lsv-chat-user .lsv-chat-bubble {
-          background: #0d6b57;
-          color: #fff;
+          background: #00a1ff;
+          color: #051018;
           border-bottom-right-radius: 3px;
         }
         #lsv-chat .lsv-chat-assistant .lsv-chat-bubble {
-          background: #23272b;
-          color: #e8eaed;
+          background: #162136;
+          color: #e7edf5;
           border-bottom-left-radius: 3px;
         }
         #lsv-chat .lsv-chat-bubble.lsv-chat-err {
@@ -632,31 +626,34 @@
           display: flex;
           gap: 8px;
           padding: 12px 16px;
-          border-top: 1px solid #23272b;
+          border-top: 1px solid #1c2942;
         }
         #lsv-chat .lsv-chat-input textarea {
           flex: 1;
           resize: none;
-          background: #1c2024;
-          border: 1px solid #2c3136;
+          background: #162136;
+          border: 1px solid #26344c;
           border-radius: 8px;
-          color: #e8eaed;
+          color: #e7edf5;
           font-family: inherit;
           font-size: 14px;
           padding: 8px 10px;
         }
         #lsv-chat .lsv-chat-input textarea:focus {
           outline: none;
-          border-color: #0d6b57;
+          border-color: #00a1ff;
         }
         #lsv-chat .lsv-chat-input button {
-          background: #0d6b57;
+          background: #ffac00;
           border: 0;
           border-radius: 8px;
-          color: #fff;
+          color: #14202e;
           cursor: pointer;
           font-weight: 700;
           padding: 0 16px;
+        }
+        #lsv-chat .lsv-chat-input button:hover {
+          background: #ffbb2e;
         }
       `;
       (document.head || document.documentElement).appendChild(style);

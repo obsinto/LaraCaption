@@ -52,6 +52,13 @@
   let timer = null;
   let overlayOn = false;
   let lastEmit = null;
+  let config = { autoPause: false };
+  let pausedCueKey = null; // cue em que já pausamos (evita pausar 2x na mesma)
+
+  // Margem antes do fim da cue. Pausamos um pouco antes do endTime para a
+  // legenda da frase ATUAL continuar na tela no momento da pausa — assim o
+  // que você vê é o que acabou de ouvir (melhor para shadowing/estudo).
+  const PAUSE_LEAD = 0.3;
 
   // Mantém a faixa "hidden" (ativa, carrega cues, mas sem legenda nativa).
   function assertHidden() {
@@ -93,12 +100,39 @@
     window.postMessage({ source: "lsv-inject", type: "CUES", lines, ahead }, "*");
   }
 
+  // Modo estudo: pausa perto do FIM da frase atual (com a legenda dela
+  // ainda visível), uma vez por cue.
+  function maybeAutoPause() {
+    const video = getVideo();
+    const track = getTrack();
+    if (!video || !track || video.paused) return;
+
+    const now = video.currentTime;
+    const cues = track.cues ? [...track.cues] : [];
+
+    let active = null;
+    for (const cue of cues) {
+      if (cue.startTime <= now && cue.endTime >= now && norm(cue.text)) active = cue;
+    }
+    if (!active) return;
+
+    const key = active.startTime + "|" + norm(active.text);
+    if (key === pausedCueKey) return; // já pausamos nesta frase
+
+    if (active.endTime - now <= PAUSE_LEAD) {
+      pausedCueKey = key;
+      pauseMedia();
+    }
+  }
+
   function ensureTimer() {
     if (timer) return;
     timer = setInterval(() => {
       assertHidden();
-      if (overlayOn) computeAndEmit();
-    }, 250);
+      if (!overlayOn) return;
+      computeAndEmit();
+      if (config.autoPause) maybeAutoPause();
+    }, 200);
   }
 
   function startOverlay() {
@@ -119,7 +153,7 @@
     ensureTimer();
   }
 
-  function pauseVideo() {
+  function pauseMedia() {
     const player = document.querySelector("mux-player");
     const media = player && typeof player.pause === "function" ? player : getVideo();
     if (media && typeof media.pause === "function" && !media.paused) media.pause();
@@ -199,8 +233,9 @@
       startOverlay();
     } else if (data.cmd === "DEACTIVATE") {
       stopOverlay();
-    } else if (data.cmd === "PAUSE") {
-      pauseVideo();
+    } else if (data.cmd === "CONFIG") {
+      config.autoPause = !!data.autoPause;
+      pausedCueKey = null;
     } else if (data.cmd === "BUILD_TRANSCRIPT") {
       try {
         const result = await buildTranscript();
