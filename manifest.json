@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Laracasts Subtitle Viewer",
+  "description": "Shows only the subtitle/transcript for the current Laracasts lesson.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "Laracasts subtitles",
+    "default_popup": "src/popup.html"
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://laracasts.com/*",
+        "https://www.laracasts.com/*"
+      ],
+      "js": [
+        "src/inject.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://laracasts.com/*",
+        "https://www.laracasts.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://laracasts.com/*",
+    "https://www.laracasts.com/*",
+    "https://player.vimeo.com/*",
+    "https://*.vimeo.com/*",
+    "https://*.vimeocdn.com/*",
+    "https://*.mux.com/*",
+    "https://api.openai.com/*"
+  ]
+}
