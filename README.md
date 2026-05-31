@@ -18,6 +18,7 @@ LaraCaption overlays the lesson's subtitle right on top of the video, can transl
   - **Dual** — English on top, translation below (great for learning).
 - **🧠 Chat about the video** — a side panel where you can ask anything about the lesson. The AI receives the **full transcript** as context, so it can summarize, explain vocabulary/grammar, build a quiz, etc.
 - **⏸️ Study mode** — pauses automatically at each subtitle so you can read and absorb one phrase at a time.
+- **↺ Replay last phrase** — a floating button on the player jumps back to the most recent spoken subtitle.
 - **🔠 Subtitle size** — small / medium / large / extra large.
 - **⬇️ Download subtitle** — export the caption as an `.srt` file.
 - **▶️ Continue watching** — one click jumps back to the last lesson you opened (Laracasts resumes the video where you left off), or to your *watching* list on first use.
@@ -57,7 +58,8 @@ Settings are saved automatically. With `gpt-4o-mini` the cost is just a few cent
    - **Chat about this video** — opens the chat panel; wait for *"transcript ready"* and ask away (in English or your language).
    - **Download subtitle (.srt)** — saves the caption file.
    - **Continue watching** — reopens your last lesson (or your *watching* list).
-3. Change the mode/size/study-mode anytime — it updates live.
+3. Use the floating **↺** button on the video to repeat the latest subtitle phrase.
+4. Change the mode/size/study-mode anytime — it updates live.
 
 ---
 

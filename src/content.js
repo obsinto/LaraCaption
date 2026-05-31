@@ -82,15 +82,22 @@
   const Overlay = {
     on: false,
     el: null,
+    replayButton: null,
     style: null,
+    shadowStyles: new WeakMap(),
     settings: { mode: "original", targetLang: "Portuguese" },
     cache: new Map(), // texto original -> tradução
     pending: new Set(), // textos em tradução no momento
     lastError: "",
     storageBound: false,
     originals: [], // linhas da legenda atual (vêm do inject.js)
+    canReplay: false,
     msgHandler: null,
+    fullscreenHandler: null,
+    shadowFullscreenRoot: null,
+    fullscreenPlaceTimer: null,
     placeTimer: null,
+    replayFlashTimer: null,
 
     toggle() {
       if (this.on) {
@@ -145,6 +152,10 @@
         };
         window.addEventListener("message", this.msgHandler);
       }
+      if (!this.fullscreenHandler) {
+        this.fullscreenHandler = () => this.onFullscreenChange();
+        document.addEventListener("fullscreenchange", this.fullscreenHandler);
+      }
 
       // Pede ao script de página para ativar a faixa de legenda — só assim
       // o hls.js carrega as cues sem precisar clicar no CC.
@@ -165,6 +176,18 @@
         window.removeEventListener("message", this.msgHandler);
         this.msgHandler = null;
       }
+      if (this.fullscreenHandler) {
+        document.removeEventListener("fullscreenchange", this.fullscreenHandler);
+        if (this.shadowFullscreenRoot) {
+          this.shadowFullscreenRoot.removeEventListener("fullscreenchange", this.fullscreenHandler);
+          this.shadowFullscreenRoot = null;
+        }
+        this.fullscreenHandler = null;
+      }
+      if (this.fullscreenPlaceTimer) {
+        clearTimeout(this.fullscreenPlaceTimer);
+        this.fullscreenPlaceTimer = null;
+      }
       if (this.placeTimer) {
         clearInterval(this.placeTimer);
         this.placeTimer = null;
@@ -173,7 +196,16 @@
         this.el.remove();
         this.el = null;
       }
+      if (this.replayButton) {
+        this.replayButton.remove();
+        this.replayButton = null;
+      }
+      if (this.replayFlashTimer) {
+        clearTimeout(this.replayFlashTimer);
+        this.replayFlashTimer = null;
+      }
       this.originals = [];
+      this.canReplay = false;
       console.log("📝 Legenda na tela: DESATIVADA");
     },
 
@@ -182,8 +214,10 @@
     // currentTime e o endTime de cada cue.
     onCues(data) {
       this.originals = Array.isArray(data.lines) ? data.lines : [];
+      this.canReplay = !!data.canReplay;
       this.ensurePlaced();
       this.render();
+      this.renderReplayButton();
 
       const mode = (this.settings && this.settings.mode) || "original";
       if (mode !== "original") {
@@ -231,6 +265,31 @@
       this.el.style.display = "flex";
     },
 
+    renderReplayButton() {
+      if (!this.replayButton) return;
+      this.replayButton.disabled = !this.canReplay;
+      this.replayButton.classList.toggle("lsv-replay-ready", this.canReplay);
+      this.replayButton.title = this.canReplay
+        ? "Repetir última frase"
+        : "Aguardando a primeira frase";
+    },
+
+    replayLastPhrase() {
+      if (!this.canReplay || !this.replayButton) return;
+
+      pageBridge.send("REPLAY_LAST");
+      this.replayButton.classList.remove("lsv-replay-hit");
+      // Reinicia a animacao mesmo em cliques consecutivos.
+      void this.replayButton.offsetWidth;
+      this.replayButton.classList.add("lsv-replay-hit");
+
+      if (this.replayFlashTimer) clearTimeout(this.replayFlashTimer);
+      this.replayFlashTimer = setTimeout(() => {
+        if (this.replayButton) this.replayButton.classList.remove("lsv-replay-hit");
+        this.replayFlashTimer = null;
+      }, 360);
+    },
+
     // Traduz um lote de linhas (atual + prefetch) via background/OpenAI.
     requestTranslations(texts) {
       const batch = [];
@@ -271,24 +330,161 @@
       if (!this.el) return;
       const player = document.querySelector("mux-player");
       if (!player) return;
-      const host = player.parentElement || player;
-      if (getComputedStyle(host).position === "static") {
+      this.ensureFullscreenListener(player);
+
+      const placement = this.getPlacement(player);
+      const host = placement.host;
+      this.ensureStyle(placement.root);
+
+      this.el.classList.toggle("lsv-fullscreen", placement.fullscreen);
+      if (this.replayButton) {
+        this.replayButton.classList.toggle("lsv-fullscreen", placement.fullscreen);
+      }
+
+      if (host.nodeType === Node.ELEMENT_NODE && getComputedStyle(host).position === "static") {
         host.style.position = "relative";
       }
-      if (this.el.parentElement !== host) {
+      if (this.el.parentNode !== host) {
         host.appendChild(this.el);
       }
+      if (this.replayButton && this.replayButton.parentNode !== host) {
+        host.appendChild(this.replayButton);
+      }
+    },
+
+    onFullscreenChange() {
+      const fullscreen = !!this.deepFullscreenElement();
+
+      if (this.replayButton) this.replayButton.blur();
+
+      if (this.fullscreenPlaceTimer) {
+        clearTimeout(this.fullscreenPlaceTimer);
+        this.fullscreenPlaceTimer = null;
+      }
+
+      if (!fullscreen) {
+        pageBridge.send("CANCEL_REPLAY", { pause: false });
+        this.fullscreenPlaceTimer = setTimeout(() => {
+          this.fullscreenPlaceTimer = null;
+          this.ensurePlaced();
+        }, 180);
+        return;
+      }
+
+      requestAnimationFrame(() => this.ensurePlaced());
+      this.fullscreenPlaceTimer = setTimeout(() => {
+        this.fullscreenPlaceTimer = null;
+        this.ensurePlaced();
+      }, 80);
+    },
+
+    ensureFullscreenListener(player) {
+      if (!player.shadowRoot || this.shadowFullscreenRoot === player.shadowRoot) return;
+      if (this.shadowFullscreenRoot && this.fullscreenHandler) {
+        this.shadowFullscreenRoot.removeEventListener("fullscreenchange", this.fullscreenHandler);
+      }
+      this.shadowFullscreenRoot = player.shadowRoot;
+      if (this.fullscreenHandler) {
+        this.shadowFullscreenRoot.addEventListener("fullscreenchange", this.fullscreenHandler);
+      }
+    },
+
+    getPlacement(player) {
+      const fullscreen = this.deepFullscreenElement();
+      if (!fullscreen) {
+        return { root: document, host: player.parentElement || player, fullscreen: false };
+      }
+
+      if (fullscreen === player && player.shadowRoot) {
+        return { root: player.shadowRoot, host: player.shadowRoot, fullscreen: true };
+      }
+
+      const root = fullscreen.getRootNode ? fullscreen.getRootNode() : document;
+      if (root instanceof ShadowRoot) {
+        return {
+          root,
+          host: this.shadowOverlayHost(fullscreen, player, root),
+          fullscreen: true
+        };
+      }
+
+      if (fullscreen.contains(player)) {
+        return { root: document, host: fullscreen, fullscreen: true };
+      }
+
+      if (player.contains(fullscreen)) {
+        return {
+          root: document,
+          host: this.canHostOverlay(fullscreen) ? fullscreen : fullscreen.parentElement || player,
+          fullscreen: true
+        };
+      }
+
+      return { root: document, host: player.parentElement || player, fullscreen: false };
+    },
+
+    deepFullscreenElement() {
+      let element = document.fullscreenElement;
+      while (element && element.shadowRoot && element.shadowRoot.fullscreenElement) {
+        element = element.shadowRoot.fullscreenElement;
+      }
+      return element;
+    },
+
+    canHostOverlay(element) {
+      if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+      return !["AUDIO", "CANVAS", "IFRAME", "IMG", "VIDEO"].includes(element.tagName);
+    },
+
+    shadowOverlayHost(fullscreen, player, root) {
+      if (this.canHostOverlay(fullscreen)) return fullscreen;
+
+      let current = fullscreen && fullscreen.parentElement;
+      while (current && current !== player) {
+        if (this.canHostOverlay(current)) return current;
+        current = current.parentElement;
+      }
+
+      return root;
     },
 
     ensureEl() {
-      if (this.el) return;
-      const el = document.createElement("div");
-      el.id = "lsv-overlay";
-      el.style.display = "none";
-      this.el = el;
+      if (!this.el) {
+        const el = document.createElement("div");
+        el.id = "lsv-overlay";
+        el.style.display = "none";
+        this.el = el;
+      }
+
+      if (!this.replayButton) {
+        const replay = document.createElement("button");
+        replay.id = "lsv-replay";
+        replay.type = "button";
+        replay.textContent = "↺";
+        replay.disabled = true;
+        replay.setAttribute("aria-label", "Repetir última frase");
+        replay.title = "Aguardando a primeira frase";
+        replay.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.replayLastPhrase();
+        });
+        this.replayButton = replay;
+      }
     },
 
-    ensureStyle() {
+    ensureStyle(root = document) {
+      if (root !== document) {
+        this.ensureStyle(document);
+        if (this.shadowStyles.has(root)) return;
+        const shadowStyle = document.createElement("style");
+        shadowStyle.id = "lsv-style";
+        shadowStyle.textContent = this.style.textContent;
+        root.appendChild(shadowStyle);
+        this.shadowStyles.set(root, shadowStyle);
+        return;
+      }
+
       if (this.style) return;
       const style = document.createElement("style");
       style.id = "lsv-style";
@@ -329,6 +525,85 @@
           color: #ffd6d6;
           font-size: 13px;
           font-weight: 500;
+        }
+        #lsv-overlay.lsv-fullscreen {
+          position: fixed;
+          bottom: max(8vh, 56px);
+          max-width: min(92vw, 1200px);
+          z-index: 2147483647;
+        }
+        #lsv-replay {
+          position: absolute;
+          right: max(14px, 2.2%);
+          bottom: 18%;
+          width: 44px;
+          height: 44px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(255, 194, 77, 0.55);
+          border-radius: 50%;
+          background: rgba(8, 12, 18, 0.78);
+          color: #ffc24d;
+          box-shadow: 0 10px 28px rgba(0, 0, 0, 0.36);
+          cursor: pointer;
+          font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+          font-size: 24px;
+          font-weight: 800;
+          line-height: 1;
+          z-index: 2147483001;
+          opacity: 0.42;
+          pointer-events: auto;
+          transition: transform 140ms ease, opacity 140ms ease, background 140ms ease,
+            border-color 140ms ease, box-shadow 140ms ease;
+        }
+        #lsv-replay.lsv-replay-ready {
+          opacity: 1;
+        }
+        #lsv-replay:hover:not(:disabled),
+        #lsv-replay:focus-visible:not(:disabled) {
+          background: rgba(12, 18, 27, 0.92);
+          border-color: rgba(255, 194, 77, 0.95);
+          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.46), 0 0 0 3px rgba(255, 194, 77, 0.18);
+          outline: none;
+          transform: translateY(-1px);
+        }
+        #lsv-replay:active:not(:disabled) {
+          transform: translateY(0) scale(0.96);
+        }
+        #lsv-replay:disabled {
+          cursor: default;
+        }
+        #lsv-replay.lsv-replay-hit {
+          animation: lsv-replay-pop 360ms ease;
+        }
+        #lsv-replay.lsv-fullscreen {
+          position: fixed;
+          right: max(16px, 2.6vw);
+          bottom: max(16vh, 88px);
+          z-index: 2147483647;
+        }
+        @keyframes lsv-replay-pop {
+          0% { transform: scale(0.95); }
+          55% { transform: scale(1.12); }
+          100% { transform: scale(1); }
+        }
+        @media (max-width: 640px) {
+          #lsv-replay {
+            right: 12px;
+            bottom: 20%;
+            width: 40px;
+            height: 40px;
+            font-size: 22px;
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          #lsv-replay {
+            transition: none;
+          }
+          #lsv-replay.lsv-replay-hit {
+            animation: none;
+          }
         }
       `;
       (document.head || document.documentElement).appendChild(style);

@@ -54,6 +54,10 @@
   let lastEmit = null;
   let config = { autoPause: false };
   let pausedCueKey = null; // cue em que já pausamos (evita pausar 2x na mesma)
+  let lastReplayCue = null; // ultimo trecho com texto que pode ser repetido
+  let lockedReplayCue = null;
+  let replayPauseAt = null;
+  let replayPauseTimer = null;
 
   // Margem antes do fim da cue. Pausamos um pouco antes do endTime para a
   // legenda da frase ATUAL continuar na tela no momento da pausa — assim o
@@ -78,12 +82,20 @@
     const now = video.currentTime;
     const cues = track.cues ? [...track.cues] : [];
 
-    const lines = [];
+    let lines = [];
+    const activeCues = [];
     for (const cue of cues) {
       if (cue.startTime <= now && cue.endTime >= now) {
         const text = norm(cue.text);
-        if (text) lines.push(text);
+        if (text) {
+          lines.push(text);
+          activeCues.push(cue);
+        }
       }
+    }
+    if (!lockedReplayCue) rememberReplayCue(activeCues);
+    if (lockedReplayCue && (replayPauseAt !== null || now <= lockedReplayCue.endTime + 0.2)) {
+      lines = lockedReplayCue.lines || [lockedReplayCue.text].filter(Boolean);
     }
 
     const ahead = [];
@@ -97,7 +109,99 @@
     const key = lines.join(" | ");
     if (key === lastEmit) return; // nada mudou
     lastEmit = key;
-    window.postMessage({ source: "lsv-inject", type: "CUES", lines, ahead }, "*");
+    window.postMessage(
+      { source: "lsv-inject", type: "CUES", lines, ahead, canReplay: !!lastReplayCue },
+      "*"
+    );
+  }
+
+  function rememberReplayCue(cues) {
+    if (!cues || !cues.length) return;
+
+    const texts = [];
+    let startTime = Infinity;
+    let endTime = -Infinity;
+
+    for (const cue of cues) {
+      const text = norm(cue.text);
+      if (!text) continue;
+      texts.push(text);
+      startTime = Math.min(startTime, cue.startTime);
+      endTime = Math.max(endTime, cue.endTime);
+    }
+
+    if (!texts.length || !Number.isFinite(startTime) || !Number.isFinite(endTime)) return;
+
+    lastReplayCue = {
+      startTime: Math.max(0, startTime),
+      endTime,
+      lines: texts,
+      text: texts.join(" | ")
+    };
+  }
+
+  function bestReplayCue() {
+    const video = getVideo();
+    const track = getTrack();
+    if (!video || !track) return lastReplayCue;
+
+    const now = video.currentTime;
+    const cues = track.cues ? [...track.cues] : [];
+    const active = cues.filter((cue) => cue.startTime <= now && cue.endTime >= now && norm(cue.text));
+    if (active.length) {
+      rememberReplayCue(active);
+      return lastReplayCue;
+    }
+
+    let previous = null;
+    for (const cue of cues) {
+      if (!norm(cue.text) || cue.endTime > now + 0.05) continue;
+      if (!previous || cue.endTime > previous.endTime) previous = cue;
+    }
+    if (previous) rememberReplayCue([previous]);
+
+    return lastReplayCue;
+  }
+
+  function replayLastPhrase() {
+    const video = getVideo();
+    const cue = lockedReplayCue || bestReplayCue();
+    if (!video || !cue) return;
+
+    lockedReplayCue = cue;
+    pausedCueKey = null;
+    replayPauseAt = cue.endTime;
+    startReplayPauseWatcher();
+    lastEmit = null;
+    video.currentTime = Math.max(0, cue.startTime + 0.01);
+    const play = typeof video.play === "function" && video.play();
+    if (play && typeof play.catch === "function") {
+      play.catch(() => {});
+    }
+    computeAndEmit();
+  }
+
+  function cancelReplay(pauseIfPending) {
+    const hadPendingPause = replayPauseAt !== null;
+    replayPauseAt = null;
+    lockedReplayCue = null;
+    stopReplayPauseWatcher();
+    lastEmit = null;
+
+    if (pauseIfPending && hadPendingPause) {
+      pauseMedia();
+    }
+  }
+
+  function maybeUnlockReplayCue() {
+    if (!lockedReplayCue || replayPauseAt !== null) return;
+
+    const video = getVideo();
+    if (!video || video.paused) return;
+
+    if (video.currentTime > lockedReplayCue.endTime + 0.2) {
+      lockedReplayCue = null;
+    }
   }
 
   // Modo estudo: pausa perto do FIM da frase atual (com a legenda dela
@@ -125,12 +229,48 @@
     }
   }
 
+  function maybePauseAfterReplay() {
+    if (replayPauseAt === null) {
+      stopReplayPauseWatcher();
+      return false;
+    }
+
+    const video = getVideo();
+    if (!video) {
+      replayPauseAt = null;
+      stopReplayPauseWatcher();
+      return false;
+    }
+
+    if (video.currentTime < replayPauseAt) return true;
+
+    replayPauseAt = null;
+    stopReplayPauseWatcher();
+    if (!video.paused) pauseMedia();
+    return true;
+  }
+
+  function startReplayPauseWatcher() {
+    stopReplayPauseWatcher();
+    replayPauseTimer = setInterval(() => {
+      maybePauseAfterReplay();
+    }, 30);
+  }
+
+  function stopReplayPauseWatcher() {
+    if (!replayPauseTimer) return;
+    clearInterval(replayPauseTimer);
+    replayPauseTimer = null;
+  }
+
   function ensureTimer() {
     if (timer) return;
     timer = setInterval(() => {
       assertHidden();
       if (!overlayOn) return;
+      if (maybePauseAfterReplay()) return;
       computeAndEmit();
+      maybeUnlockReplayCue();
       if (config.autoPause) maybeAutoPause();
     }, 200);
   }
@@ -138,6 +278,10 @@
   function startOverlay() {
     overlayOn = true;
     lastEmit = null;
+    lastReplayCue = null;
+    lockedReplayCue = null;
+    replayPauseAt = null;
+    stopReplayPauseWatcher();
     assertHidden();
     ensureTimer();
     computeAndEmit();
@@ -145,6 +289,7 @@
 
   function stopOverlay() {
     overlayOn = false;
+    cancelReplay(false);
   }
 
   // Usado pelo chat: só garante a faixa ativa para carregar o playlist.
@@ -236,6 +381,10 @@
     } else if (data.cmd === "CONFIG") {
       config.autoPause = !!data.autoPause;
       pausedCueKey = null;
+    } else if (data.cmd === "REPLAY_LAST") {
+      replayLastPhrase();
+    } else if (data.cmd === "CANCEL_REPLAY") {
+      cancelReplay(!!data.pause);
     } else if (data.cmd === "BUILD_TRANSCRIPT") {
       try {
         const result = await buildTranscript();
