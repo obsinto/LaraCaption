@@ -81,10 +81,10 @@
   // (evita legenda duplicada) e renderizamos nosso próprio overlay.
   const Overlay = {
     on: false,
+    root: null, // container "popover" (top layer) que segura overlay + botão
     el: null,
     replayButton: null,
     style: null,
-    shadowStyles: new WeakMap(),
     settings: { mode: "original", targetLang: "Portuguese" },
     cache: new Map(), // texto original -> tradução
     pending: new Set(), // textos em tradução no momento
@@ -95,9 +95,13 @@
     msgHandler: null,
     fullscreenHandler: null,
     shadowFullscreenRoot: null,
-    fullscreenPlaceTimer: null,
+    repositionHandler: null,
+    pointerGuard: null,
     placeTimer: null,
     replayFlashTimer: null,
+    rootRect: "", // última geometria aplicada (evita reflow à toa)
+    replayRect: null, // retângulo do botão em coords de viewport (hit-test)
+    replayHover: false,
 
     toggle() {
       if (this.on) {
@@ -156,15 +160,33 @@
         this.fullscreenHandler = () => this.onFullscreenChange();
         document.addEventListener("fullscreenchange", this.fullscreenHandler);
       }
+      // Em fullscreen o Chromium não roteia clique para popovers da top layer
+      // quando o elemento fullscreen está numa shadow tree (caso do mux-player).
+      // Então capturamos o clique no document e fazemos hit-test pela posição
+      // do botão: o vídeo recebe o clique, ele sobe até aqui em capture, e nós
+      // o tratamos como clique no botão (engolindo para o player não reagir).
+      if (!this.pointerGuard) {
+        this.pointerGuard = (event) => this.onDocumentPointer(event);
+        for (const type of ["pointerdown", "pointerup", "mousedown", "click", "pointermove"]) {
+          document.addEventListener(type, this.pointerGuard, true);
+        }
+      }
 
       // Pede ao script de página para ativar a faixa de legenda — só assim
       // o hls.js carrega as cues sem precisar clicar no CC.
       pageBridge.send("ACTIVATE");
 
-      // Mantém o overlay ancorado no player (inclusive em troca de episódio)
-      this.ensurePlaced();
+      // O overlay vive na top layer (popover em document.body) e nunca entra
+      // no shadow DOM do player. Aqui só mantemos sua geometria alinhada ao
+      // player (scroll/resize/troca de episódio na SPA).
+      this.reposition();
+      if (!this.repositionHandler) {
+        this.repositionHandler = () => this.reposition();
+        window.addEventListener("scroll", this.repositionHandler, true);
+        window.addEventListener("resize", this.repositionHandler);
+      }
       if (!this.placeTimer) {
-        this.placeTimer = setInterval(() => this.ensurePlaced(), 1500);
+        this.placeTimer = setInterval(() => this.reposition(), 1000);
       }
       console.log("📝 Legenda na tela: ATIVADA");
     },
@@ -184,22 +206,34 @@
         }
         this.fullscreenHandler = null;
       }
-      if (this.fullscreenPlaceTimer) {
-        clearTimeout(this.fullscreenPlaceTimer);
-        this.fullscreenPlaceTimer = null;
+      if (this.repositionHandler) {
+        window.removeEventListener("scroll", this.repositionHandler, true);
+        window.removeEventListener("resize", this.repositionHandler);
+        this.repositionHandler = null;
+      }
+      if (this.pointerGuard) {
+        for (const type of ["pointerdown", "pointerup", "mousedown", "click", "pointermove"]) {
+          document.removeEventListener(type, this.pointerGuard, true);
+        }
+        this.pointerGuard = null;
       }
       if (this.placeTimer) {
         clearInterval(this.placeTimer);
         this.placeTimer = null;
       }
-      if (this.el) {
-        this.el.remove();
-        this.el = null;
+      for (const node of [this.root, this.replayButton]) {
+        if (!node) continue;
+        try {
+          if (node.matches(":popover-open")) node.hidePopover();
+        } catch (_) {}
+        node.remove();
       }
-      if (this.replayButton) {
-        this.replayButton.remove();
-        this.replayButton = null;
-      }
+      this.root = null;
+      this.el = null;
+      this.replayButton = null;
+      this.rootRect = "";
+      this.replayRect = null;
+      this.replayHover = false;
       if (this.replayFlashTimer) {
         clearTimeout(this.replayFlashTimer);
         this.replayFlashTimer = null;
@@ -215,7 +249,7 @@
     onCues(data) {
       this.originals = Array.isArray(data.lines) ? data.lines : [];
       this.canReplay = !!data.canReplay;
-      this.ensurePlaced();
+      this.reposition();
       this.render();
       this.renderReplayButton();
 
@@ -290,6 +324,47 @@
       }, 360);
     },
 
+    // Hit-test do ponteiro pela posição do botão, no nível do document
+    // (capture). Necessário porque em fullscreen o ponteiro vai para o vídeo
+    // (elemento fullscreen na shadow tree), não para o nosso popover — então
+    // nem o clique nem o :hover nativo chegam ao botão, mas o evento sobe aqui.
+    onDocumentPointer(event) {
+      if (!this.on || !this.replayButton) return;
+      const hidden = this.replayButton.style.opacity === "0";
+      const inside = !hidden && this.pointInReplay(event);
+
+      // Movimento: só atualiza o estado de hover (nunca engole o evento, senão
+      // quebraria os controles/hover do próprio player).
+      if (event.type === "pointermove") {
+        this.setReplayHover(inside);
+        return;
+      }
+
+      if (hidden || !inside) return;
+      if (event.button !== undefined && event.button !== 0) return; // só primário
+
+      // Dentro do botão: engole o evento para o player não reagir (play/pause).
+      event.stopImmediatePropagation();
+      if (event.type === "click") {
+        event.preventDefault();
+        this.replayLastPhrase();
+      }
+    },
+
+    pointInReplay(event) {
+      const r = this.replayRect;
+      if (!r) return false;
+      const x = event.clientX;
+      const y = event.clientY;
+      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    },
+
+    setReplayHover(on) {
+      if (this.replayHover === on) return;
+      this.replayHover = on;
+      if (this.replayButton) this.replayButton.classList.toggle("lsv-replay-hover", on);
+    },
+
     // Traduz um lote de linhas (atual + prefetch) via background/OpenAI.
     requestTranslations(texts) {
       const batch = [];
@@ -325,57 +400,98 @@
       this.el.appendChild(div);
     },
 
-    // Ancora o overlay no container do player atual.
-    ensurePlaced() {
-      if (!this.el) return;
+    // Alinha legenda (rodapé central) e botão (rodapé direito) à caixa do
+    // player. Fora de fullscreen a caixa é o getBoundingClientRect do
+    // <mux-player>; em fullscreen é a viewport (o elemento fullscreen é
+    // desenhado em tamanho de tela na top layer, não na caixa do host).
+    reposition() {
+      if (!this.root) return;
       const player = document.querySelector("mux-player");
-      if (!player) return;
+      if (!player) {
+        this.root.style.opacity = "0";
+        if (this.replayButton) this.replayButton.style.opacity = "0";
+        this.rootRect = "";
+        this.replayRect = null;
+        return;
+      }
       this.ensureFullscreenListener(player);
 
-      const placement = this.getPlacement(player);
-      const host = placement.host;
-      this.ensureStyle(placement.root);
-
-      this.el.classList.toggle("lsv-fullscreen", placement.fullscreen);
-      if (this.replayButton) {
-        this.replayButton.classList.toggle("lsv-fullscreen", placement.fullscreen);
+      const fullscreen = !!this.deepFullscreenElement();
+      let bx, by, bw, bh;
+      if (fullscreen) {
+        bx = 0;
+        by = 0;
+        bw = window.innerWidth;
+        bh = window.innerHeight;
+      } else {
+        const r = player.getBoundingClientRect();
+        if (!r.width || !r.height) {
+          this.root.style.opacity = "0";
+          if (this.replayButton) this.replayButton.style.opacity = "0";
+          this.rootRect = "";
+          this.replayRect = null;
+          return;
+        }
+        bx = r.left;
+        by = r.top;
+        bw = r.width;
+        bh = r.height;
       }
 
-      if (host.nodeType === Node.ELEMENT_NODE && getComputedStyle(host).position === "static") {
-        host.style.position = "relative";
+      const key = (fullscreen ? "fs:" : "") + [bx, by, bw, bh].map(Math.round).join(",");
+      if (key !== this.rootRect) {
+        this.rootRect = key;
+
+        // Legenda: âncora no centro inferior; o translate(-50%,-100%) do CSS
+        // assenta a base-central exatamente nesse ponto.
+        const subBottom = Math.max(bh * 0.09, fullscreen ? 64 : 0);
+        this.root.style.left = bx + bw / 2 + "px";
+        this.root.style.top = by + bh - subBottom + "px";
+        this.root.style.maxWidth = Math.round(bw * 0.92) + "px";
+
+        // Botão: canto inferior direito. Posiciono pelo canto sup-esq (sem
+        // transform) para não conflitar com os transforms de hover/clique.
+        if (this.replayButton) {
+          const size = bw < 700 ? 40 : 44;
+          const rightPad = Math.max(fullscreen ? 16 : 14, bw * (fullscreen ? 0.026 : 0.022));
+          const btnBottom = Math.max(bh * (fullscreen ? 0.16 : 0.18), fullscreen ? 96 : 0);
+          const left = bx + bw - rightPad - size;
+          const top = by + bh - btnBottom - size;
+          this.replayButton.style.left = left + "px";
+          this.replayButton.style.top = top + "px";
+          this.replayRect = { left, top, right: left + size, bottom: top + size };
+        }
       }
-      if (this.el.parentNode !== host) {
-        host.appendChild(this.el);
-      }
-      if (this.replayButton && this.replayButton.parentNode !== host) {
-        host.appendChild(this.replayButton);
+      this.root.style.opacity = "1";
+      if (this.replayButton) this.replayButton.style.opacity = "";
+    },
+
+    // Mostra/re-mostra os popovers na top layer. Re-mostrar ao ENTRAR em
+    // fullscreen é essencial: a top layer pinta na ordem de entrada, então o
+    // elemento que entrou em fullscreen por último ficaria por cima dos nossos
+    // — re-mostrar joga legenda e botão de volta para o topo.
+    showLayers() {
+      for (const node of [this.root, this.replayButton]) {
+        if (!node || !node.isConnected || typeof node.showPopover !== "function") continue;
+        try {
+          if (node.matches(":popover-open")) node.hidePopover();
+          node.showPopover();
+        } catch (_) {
+          // Estado inesperado da Popover API: ignora (degrada para camada fixa).
+        }
       }
     },
 
     onFullscreenChange() {
-      const fullscreen = !!this.deepFullscreenElement();
-
       if (this.replayButton) this.replayButton.blur();
-
-      if (this.fullscreenPlaceTimer) {
-        clearTimeout(this.fullscreenPlaceTimer);
-        this.fullscreenPlaceTimer = null;
-      }
-
-      if (!fullscreen) {
-        pageBridge.send("CANCEL_REPLAY", { pause: false });
-        this.fullscreenPlaceTimer = setTimeout(() => {
-          this.fullscreenPlaceTimer = null;
-          this.ensurePlaced();
-        }, 180);
-        return;
-      }
-
-      requestAnimationFrame(() => this.ensurePlaced());
-      this.fullscreenPlaceTimer = setTimeout(() => {
-        this.fullscreenPlaceTimer = null;
-        this.ensurePlaced();
-      }, 80);
+      const fullscreen = !!this.deepFullscreenElement();
+      // Ao entrar, sobe legenda e botão acima do elemento fullscreen recém
+      // promovido. Ao sair, NÃO mexemos na top layer nem em nenhum nó do shadow
+      // DOM do player — só reposicionamos (era esse "mexer durante a transição"
+      // que travava a aba).
+      if (fullscreen) this.showLayers();
+      this.reposition();
+      requestAnimationFrame(() => this.reposition());
     },
 
     ensureFullscreenListener(player) {
@@ -389,40 +505,6 @@
       }
     },
 
-    getPlacement(player) {
-      const fullscreen = this.deepFullscreenElement();
-      if (!fullscreen) {
-        return { root: document, host: player.parentElement || player, fullscreen: false };
-      }
-
-      if (fullscreen === player && player.shadowRoot) {
-        return { root: player.shadowRoot, host: player.shadowRoot, fullscreen: true };
-      }
-
-      const root = fullscreen.getRootNode ? fullscreen.getRootNode() : document;
-      if (root instanceof ShadowRoot) {
-        return {
-          root,
-          host: this.shadowOverlayHost(fullscreen, player, root),
-          fullscreen: true
-        };
-      }
-
-      if (fullscreen.contains(player)) {
-        return { root: document, host: fullscreen, fullscreen: true };
-      }
-
-      if (player.contains(fullscreen)) {
-        return {
-          root: document,
-          host: this.canHostOverlay(fullscreen) ? fullscreen : fullscreen.parentElement || player,
-          fullscreen: true
-        };
-      }
-
-      return { root: document, host: player.parentElement || player, fullscreen: false };
-    },
-
     deepFullscreenElement() {
       let element = document.fullscreenElement;
       while (element && element.shadowRoot && element.shadowRoot.fullscreenElement) {
@@ -431,24 +513,21 @@
       return element;
     },
 
-    canHostOverlay(element) {
-      if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-      return !["AUDIO", "CANVAS", "IFRAME", "IMG", "VIDEO"].includes(element.tagName);
-    },
-
-    shadowOverlayHost(fullscreen, player, root) {
-      if (this.canHostOverlay(fullscreen)) return fullscreen;
-
-      let current = fullscreen && fullscreen.parentElement;
-      while (current && current !== player) {
-        if (this.canHostOverlay(current)) return current;
-        current = current.parentElement;
+    ensureEl() {
+      // Cada peça é um POPOVER próprio (top layer) em document.body. A legenda
+      // não recebe clique, então é passthrough (pointer-events:none). O botão
+      // precisa receber clique mesmo por cima do vídeo em fullscreen — por isso
+      // é um popover SEPARADO com pointer-events:auto. (Botão como filho de um
+      // container passthrough fica inclicável sobre a top layer do fullscreen.)
+      if (!this.root) {
+        const root = document.createElement("div");
+        root.id = "lsv-root";
+        // popover="manual": entra na top layer (acima do conteúdo fullscreen)
+        // e NÃO fecha com Esc/clique, então o Esc só sai do fullscreen.
+        this.applyPopover(root);
+        this.root = root;
       }
 
-      return root;
-    },
-
-    ensureEl() {
       if (!this.el) {
         const el = document.createElement("div");
         el.id = "lsv-overlay";
@@ -464,43 +543,53 @@
         replay.disabled = true;
         replay.setAttribute("aria-label", "Repetir última frase");
         replay.title = "Aguardando a primeira frase";
-        replay.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          this.replayLastPhrase();
-        });
+        this.applyPopover(replay);
+        // O clique é tratado por onDocumentPointer (capture no document), que
+        // funciona tanto em janela quanto em fullscreen.
         this.replayButton = replay;
       }
+
+      if (this.el.parentNode !== this.root) this.root.appendChild(this.el);
+      if (!this.root.isConnected) document.body.appendChild(this.root);
+      if (!this.replayButton.isConnected) document.body.appendChild(this.replayButton);
+      this.showLayers();
     },
 
-    ensureStyle(root = document) {
-      if (root !== document) {
-        this.ensureStyle(document);
-        if (this.shadowStyles.has(root)) return;
-        const shadowStyle = document.createElement("style");
-        shadowStyle.id = "lsv-style";
-        shadowStyle.textContent = this.style.textContent;
-        root.appendChild(shadowStyle);
-        this.shadowStyles.set(root, shadowStyle);
-        return;
-      }
+    // Marca o elemento como popover manual (top layer). Sem suporte à Popover
+    // API vira camada fixa comum (funciona fora de fullscreen).
+    applyPopover(node) {
+      node.setAttribute("popover", "manual");
+      if (typeof node.showPopover !== "function") node.removeAttribute("popover");
+    },
 
+    ensureStyle() {
       if (this.style) return;
       const style = document.createElement("style");
       style.id = "lsv-style";
       style.textContent = `
-        #lsv-overlay {
+        #lsv-root {
           --lsv-scale: 1;
-          position: absolute;
-          left: 50%;
-          bottom: 9%;
-          transform: translateX(-50%);
+          position: fixed;
+          inset: auto;
+          width: max-content;
+          max-width: 92vw;
+          margin: 0;
+          padding: 0;
+          border: 0;
+          background: transparent;
+          overflow: visible;
+          pointer-events: none;
+          /* left/top vêm via JS (centro inferior do player); este transform
+             assenta a base-central exatamente nesse ponto. */
+          transform: translate(-50%, -100%);
+          opacity: 0;
+          transition: opacity 120ms ease;
+        }
+        #lsv-overlay {
           display: none;
           flex-direction: column;
           align-items: center;
           gap: 2px;
-          max-width: 92%;
-          z-index: 2147483000;
           pointer-events: none;
           text-align: center;
         }
@@ -526,16 +615,11 @@
           font-size: 13px;
           font-weight: 500;
         }
-        #lsv-overlay.lsv-fullscreen {
-          position: fixed;
-          bottom: max(8vh, 56px);
-          max-width: min(92vw, 1200px);
-          z-index: 2147483647;
-        }
         #lsv-replay {
-          position: absolute;
-          right: max(14px, 2.2%);
-          bottom: 18%;
+          position: fixed;
+          inset: auto;
+          margin: 0;
+          /* left/top vêm via JS (canto inferior direito do player). */
           width: 44px;
           height: 44px;
           display: inline-flex;
@@ -561,6 +645,7 @@
           opacity: 1;
         }
         #lsv-replay:hover:not(:disabled),
+        #lsv-replay.lsv-replay-hover:not(:disabled),
         #lsv-replay:focus-visible:not(:disabled) {
           background: rgba(12, 18, 27, 0.92);
           border-color: rgba(255, 194, 77, 0.95);
@@ -577,21 +662,13 @@
         #lsv-replay.lsv-replay-hit {
           animation: lsv-replay-pop 360ms ease;
         }
-        #lsv-replay.lsv-fullscreen {
-          position: fixed;
-          right: max(16px, 2.6vw);
-          bottom: max(16vh, 88px);
-          z-index: 2147483647;
-        }
         @keyframes lsv-replay-pop {
           0% { transform: scale(0.95); }
           55% { transform: scale(1.12); }
           100% { transform: scale(1); }
         }
-        @media (max-width: 640px) {
+        @media (max-width: 700px) {
           #lsv-replay {
-            right: 12px;
-            bottom: 20%;
             width: 40px;
             height: 40px;
             font-size: 22px;
