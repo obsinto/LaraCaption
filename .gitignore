@@ -1,0 +1,10 @@
+# Local agent/tooling files (not part of the extension)
+.claude/
+.codex/
+.agents/
+src/.agent_memory.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
