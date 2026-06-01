@@ -102,6 +102,9 @@
     rootRect: "", // última geometria aplicada (evita reflow à toa)
     replayRect: null, // retângulo do botão em coords de viewport (hit-test)
     replayHover: false,
+    askButton: null, // botão de dúvida (IA) sobre a frase atual
+    askRect: null, // retângulo do botão de dúvida (hit-test)
+    askHover: false,
 
     toggle() {
       if (this.on) {
@@ -221,7 +224,8 @@
         clearInterval(this.placeTimer);
         this.placeTimer = null;
       }
-      for (const node of [this.root, this.replayButton]) {
+      Ask.close();
+      for (const node of [this.root, this.replayButton, this.askButton]) {
         if (!node) continue;
         try {
           if (node.matches(":popover-open")) node.hidePopover();
@@ -231,9 +235,12 @@
       this.root = null;
       this.el = null;
       this.replayButton = null;
+      this.askButton = null;
       this.rootRect = "";
       this.replayRect = null;
       this.replayHover = false;
+      this.askRect = null;
+      this.askHover = false;
       if (this.replayFlashTimer) {
         clearTimeout(this.replayFlashTimer);
         this.replayFlashTimer = null;
@@ -252,6 +259,7 @@
       this.reposition();
       this.render();
       this.renderReplayButton();
+      this.renderAskButton();
 
       const mode = (this.settings && this.settings.mode) || "original";
       if (mode !== "original") {
@@ -308,6 +316,34 @@
         : "Aguardando a primeira frase";
     },
 
+    renderAskButton() {
+      if (!this.askButton) return;
+      const has = this.originals.length > 0;
+      this.askButton.disabled = !has;
+      this.askButton.classList.toggle("lsv-ask-ready", has);
+      this.askButton.title = has
+        ? "Tirar dúvida sobre esta frase (IA)"
+        : "Aguardando a primeira frase";
+    },
+
+    // Abre o balão de dúvida ancorado na frase atual. Pausa o vídeo e, em
+    // fullscreen, sai dele — o painel é um elemento fixo comum (não popover),
+    // então não receberia clique/foco por cima do vídeo em fullscreen.
+    openAsk() {
+      const phrase = this.originals.join(" ").trim();
+      if (!phrase) return;
+      const translation = this.originals
+        .map((line) => this.cache.get(line))
+        .filter(Boolean)
+        .join(" ");
+
+      pageBridge.send("PAUSE");
+      if (this.deepFullscreenElement() && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
+      Ask.open(phrase, translation);
+    },
+
     replayLastPhrase() {
       if (!this.canReplay || !this.replayButton) return;
 
@@ -329,40 +365,49 @@
     // (elemento fullscreen na shadow tree), não para o nosso popover — então
     // nem o clique nem o :hover nativo chegam ao botão, mas o evento sobe aqui.
     onDocumentPointer(event) {
-      if (!this.on || !this.replayButton) return;
-      const hidden = this.replayButton.style.opacity === "0";
-      const inside = !hidden && this.pointInReplay(event);
+      if (!this.on) return;
+      const replayHidden = !this.replayButton || this.replayButton.style.opacity === "0";
+      const askHidden = !this.askButton || this.askButton.style.opacity === "0";
+      const inReplay = !replayHidden && this.pointInRect(event, this.replayRect);
+      const inAsk = !askHidden && this.pointInRect(event, this.askRect);
 
       // Movimento: só atualiza o estado de hover (nunca engole o evento, senão
       // quebraria os controles/hover do próprio player).
       if (event.type === "pointermove") {
-        this.setReplayHover(inside);
+        this.setReplayHover(inReplay);
+        this.setAskHover(inAsk);
         return;
       }
 
-      if (hidden || !inside) return;
+      if (!inReplay && !inAsk) return;
       if (event.button !== undefined && event.button !== 0) return; // só primário
 
-      // Dentro do botão: engole o evento para o player não reagir (play/pause).
+      // Dentro de um botão: engole o evento para o player não reagir (play/pause).
       event.stopImmediatePropagation();
       if (event.type === "click") {
         event.preventDefault();
-        this.replayLastPhrase();
+        if (inAsk) this.openAsk();
+        else if (inReplay) this.replayLastPhrase();
       }
     },
 
-    pointInReplay(event) {
-      const r = this.replayRect;
-      if (!r) return false;
+    pointInRect(event, rect) {
+      if (!rect) return false;
       const x = event.clientX;
       const y = event.clientY;
-      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     },
 
     setReplayHover(on) {
       if (this.replayHover === on) return;
       this.replayHover = on;
       if (this.replayButton) this.replayButton.classList.toggle("lsv-replay-hover", on);
+    },
+
+    setAskHover(on) {
+      if (this.askHover === on) return;
+      this.askHover = on;
+      if (this.askButton) this.askButton.classList.toggle("lsv-ask-hover", on);
     },
 
     // Traduz um lote de linhas (atual + prefetch) via background/OpenAI.
@@ -410,8 +455,10 @@
       if (!player) {
         this.root.style.opacity = "0";
         if (this.replayButton) this.replayButton.style.opacity = "0";
+        if (this.askButton) this.askButton.style.opacity = "0";
         this.rootRect = "";
         this.replayRect = null;
+        this.askRect = null;
         return;
       }
       this.ensureFullscreenListener(player);
@@ -428,8 +475,10 @@
         if (!r.width || !r.height) {
           this.root.style.opacity = "0";
           if (this.replayButton) this.replayButton.style.opacity = "0";
+          if (this.askButton) this.askButton.style.opacity = "0";
           this.rootRect = "";
           this.replayRect = null;
+          this.askRect = null;
           return;
         }
         bx = r.left;
@@ -460,10 +509,37 @@
           this.replayButton.style.left = left + "px";
           this.replayButton.style.top = top + "px";
           this.replayRect = { left, top, right: left + size, bottom: top + size };
+
+          // Botão de dúvida: à esquerda do replay, com uma folga.
+          if (this.askButton) {
+            const askLeft = left - size - Math.round(size * 0.28);
+            this.askButton.style.left = askLeft + "px";
+            this.askButton.style.top = top + "px";
+            this.askRect = { left: askLeft, top, right: askLeft + size, bottom: top + size };
+          }
         }
       }
       this.root.style.opacity = "1";
       if (this.replayButton) this.replayButton.style.opacity = "";
+      if (this.askButton) this.askButton.style.opacity = "";
+      this.positionAskPanel();
+    },
+
+    // Mantém o balão de dúvida ancorado logo acima dos botões (?/↺),
+    // alinhado pela borda direita do botão de replay.
+    positionAskPanel() {
+      const panel = Ask.panel;
+      if (!panel || panel.style.display !== "flex") return;
+      const anchor = this.replayRect || this.askRect;
+      if (!anchor) return;
+
+      const gap = 10;
+      const bottom = window.innerHeight - anchor.top + gap;
+      panel.style.bottom = bottom + "px";
+      panel.style.top = "auto";
+      panel.style.right = Math.max(8, window.innerWidth - anchor.right) + "px";
+      panel.style.left = "auto";
+      panel.style.maxHeight = Math.max(160, anchor.top - gap - 12) + "px";
     },
 
     // Mostra/re-mostra os popovers na top layer. Re-mostrar ao ENTRAR em
@@ -471,7 +547,7 @@
     // elemento que entrou em fullscreen por último ficaria por cima dos nossos
     // — re-mostrar joga legenda e botão de volta para o topo.
     showLayers() {
-      for (const node of [this.root, this.replayButton]) {
+      for (const node of [this.root, this.replayButton, this.askButton]) {
         if (!node || !node.isConnected || typeof node.showPopover !== "function") continue;
         try {
           if (node.matches(":popover-open")) node.hidePopover();
@@ -484,6 +560,7 @@
 
     onFullscreenChange() {
       if (this.replayButton) this.replayButton.blur();
+      if (this.askButton) this.askButton.blur();
       const fullscreen = !!this.deepFullscreenElement();
       // Ao entrar, sobe legenda e botão acima do elemento fullscreen recém
       // promovido. Ao sair, NÃO mexemos na top layer nem em nenhum nó do shadow
@@ -549,9 +626,23 @@
         this.replayButton = replay;
       }
 
+      if (!this.askButton) {
+        const ask = document.createElement("button");
+        ask.id = "lsv-ask";
+        ask.type = "button";
+        ask.textContent = "?";
+        ask.disabled = true;
+        ask.setAttribute("aria-label", "Tirar dúvida sobre esta frase");
+        ask.title = "Aguardando a primeira frase";
+        this.applyPopover(ask);
+        // Clique tratado por onDocumentPointer (igual ao replay).
+        this.askButton = ask;
+      }
+
       if (this.el.parentNode !== this.root) this.root.appendChild(this.el);
       if (!this.root.isConnected) document.body.appendChild(this.root);
       if (!this.replayButton.isConnected) document.body.appendChild(this.replayButton);
+      if (!this.askButton.isConnected) document.body.appendChild(this.askButton);
       this.showLayers();
     },
 
@@ -667,8 +758,57 @@
           55% { transform: scale(1.12); }
           100% { transform: scale(1); }
         }
+        #lsv-ask {
+          position: fixed;
+          inset: auto;
+          margin: 0;
+          /* left/top vêm via JS (à esquerda do botão de replay). */
+          width: 44px;
+          height: 44px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(255, 194, 77, 0.55);
+          border-radius: 50%;
+          background: rgba(8, 12, 18, 0.78);
+          color: #ffc24d;
+          box-shadow: 0 10px 28px rgba(0, 0, 0, 0.36);
+          cursor: pointer;
+          font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+          font-size: 24px;
+          font-weight: 800;
+          line-height: 1;
+          z-index: 2147483002;
+          opacity: 0.42;
+          pointer-events: auto;
+          transition: transform 140ms ease, opacity 140ms ease, background 140ms ease,
+            border-color 140ms ease, box-shadow 140ms ease;
+        }
+        #lsv-ask.lsv-ask-ready {
+          opacity: 1;
+        }
+        #lsv-ask:hover:not(:disabled),
+        #lsv-ask.lsv-ask-hover:not(:disabled),
+        #lsv-ask:focus-visible:not(:disabled) {
+          background: rgba(12, 18, 27, 0.92);
+          border-color: rgba(255, 194, 77, 0.95);
+          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.46), 0 0 0 3px rgba(255, 194, 77, 0.18);
+          outline: none;
+          transform: translateY(-1px);
+        }
+        #lsv-ask:active:not(:disabled) {
+          transform: translateY(0) scale(0.96);
+        }
+        #lsv-ask:disabled {
+          cursor: default;
+        }
         @media (max-width: 700px) {
           #lsv-replay {
+            width: 40px;
+            height: 40px;
+            font-size: 22px;
+          }
+          #lsv-ask {
             width: 40px;
             height: 40px;
             font-size: 22px;
@@ -680,6 +820,9 @@
           }
           #lsv-replay.lsv-replay-hit {
             animation: none;
+          }
+          #lsv-ask {
+            transition: none;
           }
         }
       `;
@@ -1005,6 +1148,374 @@
           padding: 0 16px;
         }
         #lsv-chat .lsv-chat-input button:hover {
+          background: #ffbb2e;
+        }
+      `;
+      (document.head || document.documentElement).appendChild(style);
+      this.style = style;
+    }
+  };
+
+  // ===================================================================
+  //  Balão de dúvida (IA) sobre a frase atual da legenda
+  // ===================================================================
+  //
+  // Diferente do Chat (painel lateral sobre o vídeo inteiro), este é um
+  // balão contextual: abre já sabendo a frase em inglês e a tradução, e
+  // foca em gramática / vocabulário / expressões DAQUELA frase. Reutiliza
+  // o mesmo canal "CHAT" do background (OpenAI, chave do usuário).
+  const Ask = {
+    panel: null,
+    contextEl: null,
+    messagesEl: null,
+    inputEl: null,
+    style: null,
+    phrase: "",
+    translation: "",
+    targetLang: "Portuguese",
+    history: [],
+
+    // Atalhos de pergunta: gramática, vocabulário e expressões.
+    chips: [
+      {
+        label: "Gramática",
+        question:
+          "Explique a gramática desta frase: tempos verbais, estrutura e por que é assim."
+      },
+      {
+        label: "Vocabulário",
+        question: "Explique as palavras e o vocabulário importante desta frase."
+      },
+      {
+        label: "Expressões",
+        question:
+          "Tem alguma expressão, phrasal verb ou gíria nesta frase? Explique o sentido."
+      }
+    ],
+
+    open(phrase, translation) {
+      this.ensureStyle();
+      this.ensurePanel();
+
+      chrome.storage.local.get("settings").then(({ settings }) => {
+        if (settings && settings.targetLang) this.targetLang = settings.targetLang;
+      });
+
+      // Frase nova -> reinicia a conversa.
+      if (phrase !== this.phrase) {
+        this.phrase = phrase;
+        this.translation = translation || "";
+        this.history = [];
+        if (this.messagesEl) this.messagesEl.textContent = "";
+        this.renderContext();
+      }
+
+      this.panel.style.display = "flex";
+      Overlay.positionAskPanel();
+      this.inputEl.focus();
+    },
+
+    close() {
+      if (this.panel) this.panel.style.display = "none";
+    },
+
+    ask(text) {
+      text = (text || "").trim();
+      if (!text) return;
+
+      this.addMessage("user", text);
+      this.history.push({ role: "user", content: text });
+
+      const bubble = this.addMessage("assistant", "…");
+      chrome.runtime.sendMessage({ type: "CHAT", messages: this.buildMessages() }, (response) => {
+        if (response && response.ok && response.reply) {
+          bubble.textContent = response.reply;
+          this.history.push({ role: "assistant", content: response.reply });
+        } else {
+          bubble.textContent = "⚠ " + ((response && response.error) || "Erro ao responder.");
+          bubble.classList.add("lsv-ask-err-bubble");
+        }
+        this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+      });
+    },
+
+    buildMessages() {
+      const context = this.translation
+        ? `English phrase: "${this.phrase}"\nTranslation (${this.targetLang}): "${this.translation}"`
+        : `English phrase: "${this.phrase}"`;
+
+      const system = {
+        role: "system",
+        content:
+          `You are a friendly English tutor for a ${this.targetLang}-speaking student who is ` +
+          `learning English by watching a Laracasts lesson. The student is asking about ONE ` +
+          `subtitle phrase. Focus on grammar, vocabulary and idioms/expressions in that phrase. ` +
+          `Give clear, short explanations with simple examples. Answer in ${this.targetLang} ` +
+          `unless the student writes in English. Be concise.\n\n` +
+          context
+      };
+      return [system, ...this.history.slice(-10)];
+    },
+
+    addMessage(role, text) {
+      const row = document.createElement("div");
+      row.className = "lsv-ask-msg lsv-ask-" + role;
+      const bubble = document.createElement("div");
+      bubble.className = "lsv-ask-bubble";
+      bubble.textContent = text;
+      row.appendChild(bubble);
+      this.messagesEl.appendChild(row);
+      this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+      return bubble;
+    },
+
+    renderContext() {
+      if (!this.contextEl) return;
+      this.contextEl.textContent = "";
+
+      const en = document.createElement("div");
+      en.className = "lsv-ask-ctx-en";
+      en.textContent = this.phrase;
+      this.contextEl.appendChild(en);
+
+      if (this.translation) {
+        const pt = document.createElement("div");
+        pt.className = "lsv-ask-ctx-pt";
+        pt.textContent = this.translation;
+        this.contextEl.appendChild(pt);
+      }
+    },
+
+    ensurePanel() {
+      if (this.panel) return;
+
+      const panel = document.createElement("div");
+      panel.id = "lsv-ask-panel";
+
+      const header = document.createElement("div");
+      header.className = "lsv-ask-header";
+      const title = document.createElement("span");
+      title.textContent = "Tirar dúvida";
+      const closeBtn = document.createElement("button");
+      closeBtn.className = "lsv-ask-close";
+      closeBtn.type = "button";
+      closeBtn.textContent = "✕";
+      closeBtn.addEventListener("click", () => this.close());
+      header.appendChild(title);
+      header.appendChild(closeBtn);
+
+      const context = document.createElement("div");
+      context.className = "lsv-ask-context";
+      this.contextEl = context;
+
+      const chips = document.createElement("div");
+      chips.className = "lsv-ask-chips";
+      for (const chip of this.chips) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "lsv-ask-chip";
+        button.textContent = chip.label;
+        button.addEventListener("click", () => this.ask(chip.question));
+        chips.appendChild(button);
+      }
+
+      const messages = document.createElement("div");
+      messages.className = "lsv-ask-messages";
+      this.messagesEl = messages;
+
+      const form = document.createElement("form");
+      form.className = "lsv-ask-input";
+      const input = document.createElement("textarea");
+      input.rows = 2;
+      input.placeholder = "Pergunte sobre gramática, palavras, expressões…";
+      this.inputEl = input;
+      const sendBtn = document.createElement("button");
+      sendBtn.type = "submit";
+      sendBtn.textContent = "Enviar";
+
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const text = this.inputEl.value;
+        this.inputEl.value = "";
+        this.ask(text);
+      });
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          const text = this.inputEl.value;
+          this.inputEl.value = "";
+          this.ask(text);
+        }
+      });
+
+      form.appendChild(input);
+      form.appendChild(sendBtn);
+
+      panel.appendChild(header);
+      panel.appendChild(context);
+      panel.appendChild(chips);
+      panel.appendChild(messages);
+      panel.appendChild(form);
+      document.body.appendChild(panel);
+      this.panel = panel;
+    },
+
+    ensureStyle() {
+      if (this.style) return;
+      const style = document.createElement("style");
+      style.id = "lsv-ask-style";
+      style.textContent = `
+        #lsv-ask-panel {
+          position: fixed;
+          right: 18px;
+          bottom: 96px;
+          width: 360px;
+          max-width: 92vw;
+          max-height: 62vh;
+          display: none;
+          flex-direction: column;
+          background: #0b1524;
+          color: #e7edf5;
+          font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+          border: 1px solid #26344c;
+          border-radius: 14px;
+          box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+          z-index: 2147483005;
+          overflow: hidden;
+        }
+        #lsv-ask-panel .lsv-ask-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 12px 14px;
+          font-weight: 700;
+          font-size: 14px;
+          background: #162136;
+          color: #ffac00;
+          border-bottom: 1px solid #26344c;
+        }
+        #lsv-ask-panel .lsv-ask-close {
+          background: transparent;
+          border: 0;
+          color: #8a95a8;
+          cursor: pointer;
+          font-size: 15px;
+          line-height: 1;
+          padding: 4px;
+        }
+        #lsv-ask-panel .lsv-ask-close:hover {
+          color: #ffac00;
+        }
+        #lsv-ask-panel .lsv-ask-context {
+          padding: 10px 14px;
+          border-bottom: 1px solid #1c2942;
+          background: #0e1a2c;
+        }
+        #lsv-ask-panel .lsv-ask-ctx-en {
+          font-size: 13px;
+          font-weight: 600;
+          line-height: 1.4;
+          color: #e7edf5;
+        }
+        #lsv-ask-panel .lsv-ask-ctx-pt {
+          margin-top: 3px;
+          font-size: 12px;
+          line-height: 1.4;
+          color: #ffc24d;
+        }
+        #lsv-ask-panel .lsv-ask-chips {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          padding: 10px 14px;
+          border-bottom: 1px solid #1c2942;
+        }
+        #lsv-ask-panel .lsv-ask-chip {
+          background: #162136;
+          border: 1px solid #26344c;
+          border-radius: 999px;
+          color: #cfd8e6;
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 600;
+          padding: 5px 11px;
+          transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+        }
+        #lsv-ask-panel .lsv-ask-chip:hover {
+          background: #1c2a44;
+          border-color: rgba(255, 172, 0, 0.6);
+          color: #ffac00;
+        }
+        #lsv-ask-panel .lsv-ask-messages {
+          flex: 1;
+          overflow-y: auto;
+          padding: 12px 14px;
+          display: flex;
+          flex-direction: column;
+          gap: 9px;
+          min-height: 60px;
+        }
+        #lsv-ask-panel .lsv-ask-msg {
+          display: flex;
+        }
+        #lsv-ask-panel .lsv-ask-user {
+          justify-content: flex-end;
+        }
+        #lsv-ask-panel .lsv-ask-bubble {
+          max-width: 86%;
+          padding: 8px 11px;
+          border-radius: 11px;
+          font-size: 13px;
+          line-height: 1.45;
+          white-space: pre-wrap;
+          word-wrap: break-word;
+        }
+        #lsv-ask-panel .lsv-ask-user .lsv-ask-bubble {
+          background: #00a1ff;
+          color: #051018;
+          border-bottom-right-radius: 3px;
+        }
+        #lsv-ask-panel .lsv-ask-assistant .lsv-ask-bubble {
+          background: #162136;
+          color: #e7edf5;
+          border-bottom-left-radius: 3px;
+        }
+        #lsv-ask-panel .lsv-ask-bubble.lsv-ask-err-bubble {
+          background: #5a1d1d;
+          color: #ffd6d6;
+        }
+        #lsv-ask-panel .lsv-ask-input {
+          display: flex;
+          gap: 8px;
+          padding: 11px 14px;
+          border-top: 1px solid #1c2942;
+        }
+        #lsv-ask-panel .lsv-ask-input textarea {
+          flex: 1;
+          resize: none;
+          background: #162136;
+          border: 1px solid #26344c;
+          border-radius: 8px;
+          color: #e7edf5;
+          font-family: inherit;
+          font-size: 13px;
+          padding: 7px 9px;
+        }
+        #lsv-ask-panel .lsv-ask-input textarea:focus {
+          outline: none;
+          border-color: #00a1ff;
+        }
+        #lsv-ask-panel .lsv-ask-input button {
+          background: #ffac00;
+          border: 0;
+          border-radius: 8px;
+          color: #14202e;
+          cursor: pointer;
+          font-weight: 700;
+          font-size: 13px;
+          padding: 0 14px;
+        }
+        #lsv-ask-panel .lsv-ask-input button:hover {
           background: #ffbb2e;
         }
       `;

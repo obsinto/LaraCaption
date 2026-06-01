@@ -383,6 +383,8 @@
       pausedCueKey = null;
     } else if (data.cmd === "REPLAY_LAST") {
       replayLastPhrase();
+    } else if (data.cmd === "PAUSE") {
+      pauseMedia();
     } else if (data.cmd === "CANCEL_REPLAY") {
       cancelReplay(!!data.pause);
     } else if (data.cmd === "BUILD_TRANSCRIPT") {
